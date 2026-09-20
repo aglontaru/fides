@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fides - Legislation Intelligence</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        :root {
+            --sidebar-bg: #0f172a;
+            --sidebar-surface: #1e293b;
+            --main-bg: #f8fafc;
+            --text-main: #0f172a;
+            --text-muted: #64748b;
+            --header-bg: #ffffff;
+            --accent-color: #2563eb;
+            --accent-hover: #1d4ed8;
+            --border-color: #e2e8f0;
+            --message-user-bg: #eff6ff;
+            --message-bot-bg: #ffffff;
+            --user-border: #bfdbfe;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body, html {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            display: flex;
+            background-color: var(--main-bg);
+            color: var(--text-main);
+        }
+
+        /* Sidebar styling */
+        .sidebar {
+            width: 280px;
+            min-width: 280px;
+            background-color: var(--sidebar-bg);
+            color: #f8fafc;
+            padding: 24px 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            border-right: 1px solid #334155;
+            z-index: 10;
+        }
+
+        .brand-title {
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #ffffff;
+        }
+
+        .brand-subtitle {
+            font-size: 0.78rem;
+            color: #94a3b8;
+            margin-top: 4px;
+        }
+
+        .upload-card {
+            background-color: var(--sidebar-surface);
+            border: 1px dashed #475569;
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+            transition: border-color 0.2s;
+        }
+
+        .upload-card:hover {
+            border-color: var(--accent-color);
+        }
+
+        .file-upload-btn {
+            display: inline-block;
+            width: 100%;
+            padding: 10px 14px;
+            background-color: var(--accent-color);
+            color: white;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            text-align: center;
+            transition: background-color 0.2s;
+        }
+
+        .file-upload-btn:hover {
+            background-color: var(--accent-hover);
+        }
+
+        .upload-input {
+            display: none;
+        }
+
+        .docs-section {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .docs-section-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #94a3b8;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .doc-item {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            padding: 10px 12px;
+            font-size: 0.82rem;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .doc-item .doc-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .doc-item .doc-tag {
+            font-weight: 700;
+            color: #60a5fa;
+            margin-bottom: 2px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .doc-item .doc-details {
+            font-size: 0.72rem;
+            color: #94a3b8;
+        }
+
+        .doc-delete-btn {
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            cursor: pointer;
+            padding: 4px 6px;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            line-height: 1;
+            transition: all 0.2s ease;
+        }
+
+        .doc-delete-btn:hover {
+            color: #f87171;
+            background: rgba(239, 68, 68, 0.2);
+        }
+
+        /* Main chat content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            min-width: 0;
+            background-color: #f8fafc;
+        }
+
+        .header {
+            background-color: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+        }
+
+        .header-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            background: #f1f5f9;
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #ef4444;
+        }
+
+        .status-indicator.connected {
+            background-color: #10b981;
+        }
+
+        /* Chat view */
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .chat-inner {
+            max-width: 880px;
+            width: 100%;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message-row {
+            display: flex;
+            width: 100%;
+        }
+
+        .message-row.user {
+            justify-content: flex-end;
+        }
+
+        .message-row.assistant {
+            justify-content: flex-start;
+        }
+
+        .message {
+            max-width: 82%;
+            padding: 16px 20px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 0.94rem;
+            word-wrap: break-word;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+        }
+
+        .message.user {
+            background-color: var(--message-user-bg);
+            border: 1px solid var(--user-border);
+            color: #1e3a8a;
+            border-bottom-right-radius: 2px;
+        }
+
+        .message.assistant {
+            background-color: var(--message-bot-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-bottom-left-radius: 2px;
+        }
+
+        /* Markdown elements styling inside chat bubbles */
+        .message p {
+            margin: 0 0 10px 0;
+        }
+        .message p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message ul, .message ol {
+            margin: 8px 0 12px 22px;
+            padding: 0;
+        }
+
+        .message li {
+            margin-bottom: 6px;
+        }
+        .message li:last-child {
+            margin-bottom: 0;
+        }
+
+        .message strong {
+            font-weight: 600;
+            color: #0f172a;
+        }
+
+        .message.user strong {
+            color: #1e3a8a;
+        }
+
+        .message h1, .message h2, .message h3, .message h4 {
+            margin: 14px 0 8px 0;
+            font-weight: 700;
+            color: var(--text-main);
+            line-height: 1.3;
+        }
+        .message h1 { font-size: 1.22rem; }
+        .message h2 { font-size: 1.12rem; }
+        .message h3 { font-size: 1.02rem; }
+        .message h4 { font-size: 0.94rem; }
+
+        .message blockquote {
+            margin: 10px 0;
+            padding: 8px 16px;
+            border-left: 3px solid var(--accent-color);
+            background: #f1f5f9;
+            color: #334155;
+            border-radius: 0 8px 8px 0;
+            font-style: italic;
+        }
+
+        .message code {
+            background: #f1f5f9;
+            color: #0f172a;
+            border: 1px solid #e2e8f0;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.88em;
+        }
+
+        .message pre {
+            background: #0f172a;
+            color: #f8fafc;
+            padding: 14px 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85em;
+            margin: 10px 0;
+        }
+        .message pre code {
+            background: transparent;
+            border: none;
+            color: inherit;
+            padding: 0;
+        }
+
+        /* Source and Citation Highlights */
+        .legal-citation {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #eef2ff;
+            color: #3730a3;
+            border: 1px solid #c7d2fe;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.84em;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            box-shadow: 0 1px 2px rgba(55, 48, 163, 0.06);
+            transition: all 0.15s ease-in-out;
+            vertical-align: middle;
+            margin: 0 2px;
+        }
+
+        .legal-citation:hover {
+            background: #e0e7ff;
+            border-color: #818cf8;
+            color: #312e81;
+            transform: translateY(-1px);
+        }
+
+        .source-legislation {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background: #f0fdf4;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+            padding: 2px 8px;
+            border-radius: 6px;
+            font-size: 0.85em;
+            font-weight: 600;
+            box-shadow: 0 1px 2px rgba(22, 101, 52, 0.05);
+            transition: all 0.15s ease-in-out;
+            vertical-align: middle;
+            margin: 0 2px;
+        }
+
+        .source-legislation:hover {
+            background: #dcfce7;
+            border-color: #86efac;
+            color: #14532d;
+            transform: translateY(-1px);
+        }
+
+        .message.status {
+            background-color: #f1f5f9;
+            border: 1px dashed #cbd5e1;
+            color: #475569;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #cbd5e1;
+            border-top-color: #2563eb;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Input Area */
+        .input-wrapper {
+            background-color: var(--header-bg);
+            border-top: 1px solid var(--border-color);
+            padding: 18px 32px;
+        }
+
+        .input-form {
+            max-width: 880px;
+            margin: 0 auto;
+            display: flex;
+            gap: 12px;
+        }
+
+        .input-form input[type="text"] {
+            flex: 1;
+            padding: 14px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 0.95rem;
+            font-family: inherit;
+            outline: none;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+
+        .input-form input[type="text"]:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+        }
+
+        .input-form button {
+            padding: 0 24px;
+            background-color: var(--accent-color);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.92rem;
+            cursor: pointer;
+            transition: background-color 0.15s;
+        }
+
+        .input-form button:hover {
+            background-color: var(--accent-hover);
+        }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div>
+            <div class="brand-title">🏛️ Fides</div>
+            <div class="brand-subtitle">Legislation Intelligence by Rematiq</div>
+        </div>
+
+        <div class="upload-card">
+            <label class="file-upload-btn" for="fileInput">Upload Legislation PDF</label>
+            <input type="file" id="fileInput" class="upload-input" accept=".pdf">
+            <div style="font-size: 0.72rem; color: #94a3b8; margin-top: 8px;">Supports EU regulations, MDR, GDPR (up to 200+ pages)</div>
+        </div>
+
+        <div class="docs-section">
+            <div class="docs-section-title">Indexed Legislation</div>
+            <div id="docsList" style="display: flex; flex-direction: column; gap: 8px;">
+                <div style="font-size: 0.8rem; color: #64748b; font-style: italic;">No legislation loaded yet</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-content">
+        <div class="header">
+            <div class="header-title">Autonomous Knowledge Graph RAG</div>
+            <div class="status-badge">
+                <div class="status-indicator" id="statusIndicator"></div>
+                <span id="statusText">Connecting...</span>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chatContainer">
+            <div class="chat-inner" id="chatInner">
+                <!-- Messages appended dynamically -->
+            </div>
+        </div>
+
+        <div class="input-wrapper">
+            <div class="input-form">
+                <input type="text" id="messageInput" placeholder="Ask a question about indexed legislation or upload a PDF..." autocomplete="off">
+                <button id="sendBtn">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws/chat`);
+        const chatContainer = document.getElementById('chatContainer');
+        const chatInner = document.getElementById('chatInner');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+        const docsList = document.getElementById('docsList');
+
+        ws.onopen = () => {
+            statusIndicator.classList.add('connected');
+            statusText.textContent = 'Connected';
+            refreshDocuments();
+        };
+
+        ws.onclose = () => {
+            statusIndicator.classList.remove('connected');
+            statusText.textContent = 'Disconnected';
+        };
+
+        let _streamingRow = null;
+        let _streamingDiv = null;
+        let _streamingText = '';
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.type === 'message') {
+                removeStatusMessage();
+                _finalizeStream();
+                appendMessage('assistant', data.content);
+                refreshDocuments();
+            } else if (data.type === 'stream') {
+                removeStatusMessage();
+                _streamingText += (data.content || '');
+                if (!_streamingRow) {
+                    _streamingRow = document.createElement('div');
+                    _streamingRow.className = 'message-row assistant';
+                    _streamingDiv = document.createElement('div');
+                    _streamingDiv.className = 'message assistant';
+                    _streamingRow.appendChild(_streamingDiv);
+                    chatInner.appendChild(_streamingRow);
+                }
+                _streamingDiv.innerHTML = renderMarkdownWithCitations(_streamingText);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            } else if (data.type === 'end') {
+                removeStatusMessage();
+                // Finalize the streaming message with full rendered content
+                if (_streamingDiv) {
+                    const finalContent = data.content || _streamingText;
+                    _streamingDiv.innerHTML = renderMarkdownWithCitations(finalContent);
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                }
+                _streamingRow = null;
+                _streamingDiv = null;
+                _streamingText = '';
+                refreshDocuments();
+            } else if (data.type === 'status') {
+                showStatusMessage(data.content);
+            } else if (data.type === 'error') {
+                removeStatusMessage();
+                _finalizeStream();
+                appendMessage('assistant', `⚠️ ${data.content}`);
+            }
+        };
+
+        function _finalizeStream() {
+            if (_streamingDiv && _streamingText) {
+                _streamingDiv.innerHTML = renderMarkdownWithCitations(_streamingText);
+            }
+            _streamingRow = null;
+            _streamingDiv = null;
+            _streamingText = '';
+        }
+
+        async function refreshDocuments() {
+            try {
+                const res = await fetch('/api/documents');
+                if (!res.ok) return;
+                const docs = await res.json();
+                if (docs && docs.length > 0) {
+                    docsList.innerHTML = docs.map(d => {
+                        const parts = [];
+                        if (d.articles) parts.push(`${d.articles} articles`);
+                        if (d.recitals) parts.push(`${d.recitals} recitals`);
+                        const detailStr = parts.length > 0 ? parts.join(', ') : 'Indexed';
+                        const safeId = escapeHtml(d.id);
+                        const safeShort = escapeHtml(d.short_name || d.title);
+                        return `
+                        <div class="doc-item">
+                            <div class="doc-info">
+                                <div class="doc-tag" title="${escapeHtml(d.title || d.short_name)}">${safeShort}</div>
+                                <div class="doc-details">${detailStr}</div>
+                            </div>
+                            <button class="doc-delete-btn" title="Remove ${safeShort} from knowledge graph" onclick="deleteDocument('${safeId}', '${safeShort}')">🗑️</button>
+                        </div>
+                    `;}).join('');
+                } else {
+                    docsList.innerHTML = '<div style="font-size: 0.8rem; color: #64748b; font-style: italic;">No legislation loaded yet</div>';
+                }
+            } catch (e) {
+                console.error("Could not fetch documents", e);
+            }
+        }
+
+        async function deleteDocument(docId, shortName) {
+            if (!confirm(`Are you sure you want to remove '${shortName}' and its provisions from the knowledge graph?`)) {
+                return;
+            }
+            showStatusMessage(`Removing '${shortName}' from knowledge graph...`);
+            try {
+                const res = await fetch('/api/documents/' + encodeURIComponent(docId), {
+                    method: 'DELETE'
+                });
+                removeStatusMessage();
+                if (res.ok) {
+                    const data = await res.json();
+                    appendMessage('assistant', `🗑️ **Removed ${shortName}**: deleted ${data.deleted_nodes} nodes from knowledge graph.`);
+                    await refreshDocuments();
+                } else {
+                    const err = await res.json();
+                    appendMessage('assistant', `⚠️ Failed to delete ${shortName}: ${err.detail || 'Server error'}`);
+                }
+            } catch (err) {
+                removeStatusMessage();
+                appendMessage('assistant', `⚠️ Network error while deleting ${shortName}: ${err.message}`);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function showStatusMessage(text) {
+            removeStatusMessage();
+            const row = document.createElement('div');
+            row.id = 'agentStatusRow';
+            row.className = 'message-row assistant';
+            
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'message status';
+            statusDiv.innerHTML = `<div class="spinner"></div> <span>${escapeHtml(text)}</span>`;
+            
+            row.appendChild(statusDiv);
+            chatInner.appendChild(row);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function removeStatusMessage() {
+            const existing = document.getElementById('agentStatusRow');
+            if (existing) existing.remove();
+        }
+
+        function highlightLegalCitations(html) {
+            if (!html) return '';
+
+            // 1. Bracketed citations like [MDR:recital:25] or [MDR:art:19:para:1]
+            html = html.replace(/\[([A-Za-z0-9_ -]+:(?:recital|art|para|annex):[A-Za-z0-9_:.-]+)\]/gi,
+                '<span class="legal-citation" title="Knowledge Graph Provision ID">⚖️ $1</span>');
+
+            // 2. Bracketed legal provisions like [MDR, Art. 19, Para. 1] or [MDR, Recital (25)]
+            html = html.replace(/\[([A-Za-z0-9_ -]+,\s*(?:Art\.|Article|Recital)[^\]]+)\]/gi,
+                '<span class="legal-citation" title="Authoritative Citation">⚖️ $1</span>');
+
+            // 3. Article ID or Source lines
+            html = html.replace(/\b(Article ID|Source):\s*([A-Za-z0-9_ -]+:[A-Za-z0-9_:.-]+)/gi,
+                '<strong>$1:</strong> <span class="legal-citation" title="Knowledge Graph Node ID">⚖️ $2</span>');
+
+            // 4. Referenced EU Regulations, Directives and Decisions
+            html = html.replace(/\b(Regulation \((?:EC|EU)\) (?:No )?\d+\/\d+|Decision (?:No )?\d+\/\d+\/EC|Directive \d+\/\d+\/EC)\b/gi,
+                '<span class="source-legislation" title="Referenced EU Act">📜 $1</span>');
+
+            return html;
+        }
+
+        function fallbackMarkdown(text) {
+            if (!text) return '';
+            let out = text;
+
+            // Pre code blocks
+            out = out.replace(/```([\s\S]*?)```/g, (m, p1) => {
+                return '<pre><code>' + escapeHtml(p1.trim()) + '</code></pre>';
+            });
+
+            // Inline code
+            out = out.replace(/`([^`]+)`/g, (m, p1) => {
+                return '<code>' + escapeHtml(p1) + '</code>';
+            });
+
+            // Headers
+            out = out.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+            out = out.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+            out = out.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+            // Blockquotes
+            out = out.replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>');
+
+            // Bold & Italic
+            out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+            // Lists (unordered)
+            out = out.replace(/^\s*[-*]\s+(.*$)/gim, '<li>$1</li>');
+            out = out.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
+
+            // Numbered lists
+            out = out.replace(/^\s*\d+\.\s+(.*$)/gim, '<li>$1</li>');
+
+            // Paragraphs
+            out = out.replace(/\n{2,}/g, '</p><p>');
+            out = out.replace(/\n/g, '<br>');
+
+            return '<p>' + out + '</p>';
+        }
+
+        function renderMarkdownWithCitations(content) {
+            if (!content) return '';
+
+            // Clean common pre-escaped entities before rendering
+            let clean = content
+                .replace(/&gt;/g, '>')
+                .replace(/&lt;/g, '<')
+                .replace(/&amp;/g, '&')
+                .replace(/&quot;/g, '"')
+                .replace(/&#39;/g, "'");
+
+            let html = '';
+            if (typeof marked !== 'undefined' && marked.parse) {
+                try {
+                    marked.setOptions({
+                        breaks: true,
+                        gfm: true
+                    });
+                    html = marked.parse(clean);
+                } catch (e) {
+                    console.warn('marked.parse error, using fallback:', e);
+                    html = fallbackMarkdown(clean);
+                }
+            } else {
+                html = fallbackMarkdown(clean);
+            }
+
+            return highlightLegalCitations(html);
+        }
+
+        function appendMessage(role, content) {
+            const row = document.createElement('div');
+            row.className = `message-row ${role}`;
+
+            const msgDiv = document.createElement('div');
+            msgDiv.className = `message ${role}`;
+            msgDiv.innerHTML = renderMarkdownWithCitations(content);
+
+            row.appendChild(msgDiv);
+            chatInner.appendChild(row);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function sendMessage() {
+            const text = messageInput.value.trim();
+            if (text && ws.readyState === WebSocket.OPEN) {
+                appendMessage('user', text);
+                ws.send(JSON.stringify({ type: 'chat', content: text }));
+                messageInput.value = '';
+            }
+        }
+
+        const fileInput = document.getElementById('fileInput');
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            appendMessage('user', `📄 Uploading: ${file.name}`);
+            showStatusMessage(`Reading ${file.name}...`);
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                const base64Data = reader.result.split(',')[1];
+                ws.send(JSON.stringify({
+                    type: 'upload',
+                    filename: file.name,
+                    content_base64: base64Data
+                }));
+                fileInput.value = '';
+            };
+            reader.readAsDataURL(file);
+        });
+
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>

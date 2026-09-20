@@ -1,0 +1,2 @@
+{"question": "What is the definition of an AI system according to the EU AI Act?", "expected_sources": ["EU AI Act, Art. 3"], "must_contain": ["machine-based system"], "must_not_contain": []}
+{"question": "What are the prohibited AI practices?", "expected_sources": ["EU AI Act, Art. 5"], "must_contain": ["social scoring", "subliminal"], "must_not_contain": []}

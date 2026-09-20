@@ -1,0 +1,10 @@
+// Neo4j initialization script with constraints and indexes for Fides
+
+CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (a:Article) REQUIRE a.id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (p:Paragraph) REQUIRE p.id IS UNIQUE;
+CREATE CONSTRAINT IF NOT EXISTS FOR (t:Term) REQUIRE t.name IS UNIQUE;
+
+CREATE INDEX IF NOT EXISTS FOR (d:Document) ON (d.title);
+CREATE INDEX IF NOT EXISTS FOR (a:Article) ON (a.number);
+CREATE INDEX IF NOT EXISTS FOR (p:Paragraph) ON (p.number);
