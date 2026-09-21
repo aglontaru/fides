@@ -72,34 +72,85 @@ async def find_document(title: str | None = None, short_name: str | None = None)
 
 
 @mcp.tool()
-async def get_article(article_id: str) -> str:
-    """Get an article by ID with its full text."""
+async def get_graph_schema() -> str:
+    """Retrieve dynamic ontology schema, node labels, and relationship types discovered across indexed legal documents."""
+    cypher_labels = "CALL db.labels()"
+    cypher_rels = "CALL db.relationshipTypes()"
+    cypher_schemas = "MATCH (s:OntologySchema) RETURN s"
+
+    try:
+        driver = await deps.get_neo4j_driver()
+        async with driver.session() as session:
+            labels_res = await session.run(cypher_labels)
+            labels = [r["label"] async for r in labels_res]
+
+            rels_res = await session.run(cypher_rels)
+            rels = [r["relationshipType"] async for r in rels_res]
+
+            schemas_res = await session.run(cypher_schemas)
+            schemas = [dict(r["s"]) async for r in schemas_res]
+
+            return json.dumps(
+                {
+                    "status": "success",
+                    "schema": {
+                        "active_labels": labels,
+                        "active_relationships": rels,
+                        "domain_schemas": schemas,
+                    },
+                }
+            )
+    except Exception as e:
+        logger.error("Error fetching graph schema", error=str(e))
+        return json.dumps({"status": "error", "error": str(e)})
+
+
+async def _get_provision_impl(provision_id: str) -> str:
     cypher = (
-        "MATCH (a:Article {id: $article_id}) "
-        "OPTIONAL MATCH (a)-[:HAS_PARAGRAPH]->(p:Paragraph) "
-        "RETURN a.id AS article_id, a.title AS title, "
+        "MATCH (a {id: $provision_id}) "
+        "WHERE a:Article OR a:Section OR a:Provision OR a:Recital OR a:Annex "
+        "OPTIONAL MATCH (a)-[:HAS_PARAGRAPH|CONTAINS]->(p:Paragraph) "
+        "RETURN a.id AS provision_id, a.title AS title, labels(a) AS labels, "
         "       coalesce(a.full_text, a.text) AS full_text, "
         "       collect(p.text) AS paragraphs"
     )
-    res = await neo4j_query(cypher, {"article_id": article_id})
+    res = await neo4j_query(cypher, {"provision_id": provision_id})
     return str(res)
 
 
 @mcp.tool()
+async def get_provision(provision_id: str) -> str:
+    """Get any legal provision (Article, Section, Clause, Rule, Recital, Annex) by ID with its full text and paragraphs."""
+    return await _get_provision_impl(provision_id)
+
+
+@mcp.tool()
+async def get_article(article_id: str) -> str:
+    """Get a legal provision or article by ID with its full text."""
+    return await _get_provision_impl(article_id)
+
+
+@mcp.tool()
 async def get_article_with_context(article_id: str) -> str:
-    """Get an article with its parent chapter, referenced recitals, cross-refs, and definitions used."""
+    """Get a legal provision with its parent unit, recitals, cross-refs, defined terms, legal actors, and normative rules."""
     cypher = (
-        "MATCH (a:Article {id: $article_id}) "
-        "OPTIONAL MATCH (c:Chapter)-[:HAS_ARTICLE]->(a) "
+        "MATCH (a {id: $article_id}) "
+        "WHERE a:Article OR a:Section OR a:Provision OR a:Recital OR a:Annex "
+        "OPTIONAL MATCH (parent)-[:HAS_ARTICLE|HAS_SECTION|CONTAINS]->(a) "
         "OPTIONAL MATCH (a)-[:INTERPRETED_BY]->(r:Recital) "
-        "OPTIONAL MATCH (a)-[:CITES]->(ca:Article) "
+        "OPTIONAL MATCH (a)-[:CITES]->(ca) "
         "OPTIONAL MATCH (a)-[:USES_TERM]->(dt:DefinedTerm) "
-        "RETURN a.id AS article_id, "
-        "       a.text AS article_text, "
-        "       c.title AS chapter_title, "
+        "OPTIONAL MATCH (a)-[:GOVERNED_BY]->(actor:LegalActor) "
+        "OPTIONAL MATCH (a)-[:CREATES_OBLIGATION|CREATES_RIGHT|HAS_RULE]->(rule:NormativeRule) "
+        "RETURN a.id AS provision_id, "
+        "       labels(a) AS labels, "
+        "       coalesce(a.full_text, a.text) AS provision_text, "
+        "       parent.title AS parent_title, "
         "       collect(DISTINCT r.text) AS recitals, "
-        "       collect(DISTINCT ca.id) AS cited_articles, "
-        "       collect(DISTINCT dt.term + ': ' + dt.definition) AS defined_terms"
+        "       collect(DISTINCT ca.id) AS cited_provisions, "
+        "       collect(DISTINCT dt.term + ': ' + dt.definition) AS defined_terms, "
+        "       collect(DISTINCT actor.name + ' (' + actor.role + ')') AS actors, "
+        "       collect(DISTINCT rule.modality + ' [' + rule.rule_type + ']: ' + rule.description) AS normative_rules"
     )
     res = await neo4j_query(cypher, {"article_id": article_id})
     return str(res)

@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+
 import structlog
 from mcp.server.fastmcp import FastMCP
+
+# Prevent duplicate FastMCP instance when invoked as `python -m fides.mcp_server.server`
+if __name__ == "__main__" and "fides.mcp_server.server" not in sys.modules:
+    sys.modules["fides.mcp_server.server"] = sys.modules[__name__]
 
 logger = structlog.get_logger(__name__)
 
@@ -23,8 +29,9 @@ import fides.mcp_server.tools.vector_tools  # noqa: F401, E402
 
 def main() -> None:
     """Run the FastMCP server."""
-    logger.info("Running MCP server on port 8000")
-    mcp.run(transport="streamable-http")
+    tools = mcp._tool_manager.list_tools()
+    logger.info("Starting MCP server", tool_count=len(tools), tool_names=[t.name for t in tools])
+    mcp.run(transport="sse")
 
 
 if __name__ == "__main__":

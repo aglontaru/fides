@@ -41,6 +41,22 @@ class FidesSettings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-2.5-flash"
 
+    # ── Agents ────────────────────────────────────────────────────────
+    # Agent budgets
+    agent_max_replans: int = 2
+    agent_max_task_retries: int = 2
+    agent_max_tool_calls: int = 8
+    agent_task_timeout: int = 120
+
+    # Per-agent LLM overrides (optional)
+    legal_agent_model: str | None = None
+    query_agent_model: str | None = None
+    indexing_agent_model: str | None = None
+    diff_agent_model: str | None = None
+
+    # Conversation memory
+    max_conversation_tokens: int = 16000
+
     # ── Embeddings ────────────────────────────────────────────────────
     embedding_provider: LLMProvider = LLMProvider.OLLAMA
     embedding_model: str = "nomic-embed-text"
@@ -52,7 +68,7 @@ class FidesSettings(BaseSettings):
     neo4j_password: SecretStr = SecretStr("fides-dev-password")
 
     # ── MCP ───────────────────────────────────────────────────────────
-    mcp_server_url: str = "http://mcp-server:8000/mcp"
+    mcp_server_url: str = "http://mcp-server:8000/sse"
 
     # ── LangSmith ─────────────────────────────────────────────────────
     langsmith_tracing: bool = True

@@ -148,12 +148,36 @@ async def delete_document(document_id: str) -> dict[str, Any]:
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(file: UploadFile) -> DocumentUploadResponse:
     """Upload PDF via REST."""
-    return DocumentUploadResponse(
-        status="new",
-        document_title=file.filename or "unknown",
-        details="Document uploaded successfully",
-        articles_indexed=0,
-    )
+    settings = get_settings()
+    try:
+        from neo4j import AsyncGraphDatabase
+
+        from fides.ingestion import IngestionPipeline
+
+        content_bytes = await file.read()
+        driver = AsyncGraphDatabase.driver(
+            settings.neo4j_uri,
+            auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
+        )
+        try:
+            pipeline = IngestionPipeline(driver=driver, settings=settings)
+            result = await pipeline.ingest_pdf_bytes(
+                content_bytes=content_bytes,
+                filename=file.filename or "uploaded.pdf",
+            )
+        finally:
+            await driver.close()
+
+        return DocumentUploadResponse(
+            status=result.status,
+            document_title=result.document_title,
+            details=result.message
+            or f"Indexed {result.articles_count} articles and {result.recitals_count} recitals.",
+            articles_indexed=result.articles_count,
+        )
+    except Exception as e:
+        logger.error(f"REST upload failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.websocket("/ws/chat")

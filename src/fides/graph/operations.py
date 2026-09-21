@@ -11,8 +11,12 @@ from neo4j import AsyncDriver, AsyncManagedTransaction
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .models import (
+    ActorRoleNode,
+    AnnexNode,
     ArticleNode,
+    DefinedTermNode,
     DocumentNode,
+    ObligationNode,
     ParagraphNode,
     RecitalNode,
     RelType,
@@ -306,19 +310,13 @@ async def get_document_chunks_manifest(driver: AsyncDriver, doc_id: str) -> dict
                 return {"articles": {}, "paragraphs": {}, "recitals": {}}
 
             articles = {
-                item["id"]: item["hash"]
-                for item in record["articles"]
-                if item and item.get("id")
+                item["id"]: item["hash"] for item in record["articles"] if item and item.get("id")
             }
             paragraphs = {
-                item["id"]: item["hash"]
-                for item in record["paragraphs"]
-                if item and item.get("id")
+                item["id"]: item["hash"] for item in record["paragraphs"] if item and item.get("id")
             }
             recitals = {
-                item["id"]: item["text"]
-                for item in record["recitals"]
-                if item and item.get("id")
+                item["id"]: item["text"] for item in record["recitals"] if item and item.get("id")
             }
             return {
                 "articles": articles,
@@ -327,3 +325,211 @@ async def get_document_chunks_manifest(driver: AsyncDriver, doc_id: str) -> dict
             }
 
         return await session.execute_read(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def upsert_annex(driver: AsyncDriver, doc_id: str, annex: AnnexNode) -> None:
+    """Upsert an AnnexNode and link it to the Document."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (d:Document {id: $doc_id})
+            MERGE (ann:Annex {id: $props.id})
+            SET ann += $props
+            MERGE (d)-[:HAS_ANNEX]->(ann)
+            """
+            await tx.run(query, doc_id=doc_id, props=annex.to_neo4j_properties())
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def upsert_defined_term(driver: AsyncDriver, article_id: str, term: DefinedTermNode) -> None:
+    """Upsert a DefinedTermNode and link it to the defining Article."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (a:Article {id: $article_id})
+            MERGE (dt:DefinedTerm {id: $props.id})
+            SET dt += $props
+            MERGE (a)-[:DEFINES]->(dt)
+            """
+            await tx.run(query, article_id=article_id, props=term.to_neo4j_properties())
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def link_paragraph_uses_term(driver: AsyncDriver, paragraph_id: str, term_id: str) -> None:
+    """Link a Paragraph to a DefinedTerm via USES_TERM."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (p:Paragraph {id: $paragraph_id})
+            MATCH (dt:DefinedTerm {id: $term_id})
+            MERGE (p)-[:USES_TERM]->(dt)
+            """
+            await tx.run(query, paragraph_id=paragraph_id, term_id=term_id)
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def upsert_actor_role(driver: AsyncDriver, role: ActorRoleNode) -> None:
+    """Upsert an ActorRoleNode."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MERGE (r:ActorRole {name: $props.name})
+            SET r += $props
+            """
+            await tx.run(query, props=role.to_neo4j_properties())
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def upsert_obligation(
+    driver: AsyncDriver,
+    article_id: str,
+    obligation: ObligationNode,
+    actor_role_name: str | None = None,
+) -> None:
+    """Upsert an ObligationNode, link to Article (IMPOSES), and optionally to ActorRole (APPLIES_TO)."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (a:Article {id: $article_id})
+            MERGE (o:Obligation {id: $props.id})
+            SET o += $props
+            MERGE (a)-[:IMPOSES]->(o)
+            """
+            await tx.run(query, article_id=article_id, props=obligation.to_neo4j_properties())
+
+            if actor_role_name:
+                role_query = """
+                MATCH (o:Obligation {id: $obl_id})
+                MERGE (r:ActorRole {name: $role_name})
+                MERGE (o)-[:APPLIES_TO]->(r)
+                """
+                await tx.run(role_query, obl_id=obligation.id, role_name=actor_role_name)
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def link_article_references_annex(
+    driver: AsyncDriver, article_id: str, annex_id: str
+) -> None:
+    """Link an Article to an Annex via REFERENCES_ANNEX."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (a:Article {id: $article_id})
+            MATCH (ann:Annex {id: $annex_id})
+            MERGE (a)-[:REFERENCES_ANNEX]->(ann)
+            """
+            await tx.run(query, article_id=article_id, annex_id=annex_id)
+
+        await session.execute_write(_tx_func)
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+async def upsert_ontology_schema(
+    driver: AsyncDriver,
+    document_id: str,
+    domain: str,
+    node_types: list[str],
+    relationship_types: list[str],
+    description: str,
+) -> None:
+    """Register or update discovered ontology schema for a document."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> None:
+            query = """
+            MATCH (d:Document {id: $document_id})
+            MERGE (s:OntologySchema {document_id: $document_id})
+            SET s.domain = $domain,
+                s.node_types = $node_types,
+                s.relationship_types = $relationship_types,
+                s.description = $description,
+                s.updated_at = datetime()
+            MERGE (d)-[:HAS_ONTOLOGY]->(s)
+            """
+            await tx.run(
+                query,
+                document_id=document_id,
+                domain=domain,
+                node_types=node_types,
+                relationship_types=relationship_types,
+                description=description,
+            )
+
+        await session.execute_write(_tx_func)
+
+
+async def get_active_graph_schema(driver: AsyncDriver) -> dict[str, Any]:
+    """Retrieve full dynamic ontology schema and active graph types."""
+    async with driver.session() as session:
+
+        async def _tx_func(tx: AsyncManagedTransaction, /) -> dict[str, Any]:
+            labels_res = await tx.run("CALL db.labels()")
+            labels = [r["label"] async for r in labels_res]
+
+            rels_res = await tx.run("CALL db.relationshipTypes()")
+            rels = [r["relationshipType"] async for r in rels_res]
+
+            schemas_res = await tx.run("MATCH (s:OntologySchema) RETURN s")
+            schemas = [dict(r["s"]) async for r in schemas_res]
+
+            return {
+                "active_labels": labels,
+                "active_relationships": rels,
+                "domain_schemas": schemas,
+            }
+
+        return await session.execute_read(_tx_func)
+
+

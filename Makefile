@@ -1,8 +1,10 @@
-.PHONY: setup test-unit test-integration test lint format typecheck eval up down logs seed clean
+.PHONY: setup check test-unit test-integration test lint format typecheck eval up down restart logs seed clean
 
 setup:
 	uv sync --all-extras
 	uv run pre-commit install
+
+check: lint typecheck test-unit
 
 test-unit:
 	uv run pytest tests/unit -v --tb=short
@@ -32,6 +34,9 @@ up:
 down:
 	docker compose down
 
+restart:
+	docker compose restart mcp-server agents
+
 logs:
 	docker compose logs -f
 
@@ -44,3 +49,4 @@ clean:
 	find . -type d -name ".pytest_cache" -exec rm -rf {} +
 	find . -type d -name ".mypy_cache" -exec rm -rf {} +
 	find . -type d -name ".ruff_cache" -exec rm -rf {} +
+	rm -rf .coverage htmlcov

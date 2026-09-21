@@ -123,3 +123,32 @@ async def compute_content_hash(text: str) -> str:
     except Exception as e:
         logger.error("Hash computation failed", error=str(e))
         return json.dumps({"status": "error", "error": str(e)})
+
+
+@mcp.tool()
+async def ingest_document(content_base64: str, filename: str) -> str:
+    """Full end-to-end document ingestion: parse, chunk, dedup, embed, persist.
+
+    Wraps the IngestionPipeline for safe, transactional document ingestion.
+
+    Args:
+        content_base64: Base64-encoded PDF or text file content.
+        filename: Name of the file (e.g., 'eu_ai_act.pdf').
+
+    Returns:
+        JSON string containing ingestion status and statistics.
+    """
+    logger.info("Ingesting document via MCP tool", filename=filename)
+    try:
+        from fides.config.settings import get_settings
+        from fides.ingestion import IngestionPipeline
+        from fides.mcp_server.dependencies import deps
+
+        driver = await deps.get_neo4j_driver()
+        pipeline = IngestionPipeline(driver=driver, settings=get_settings())
+        content_bytes = base64.b64decode(content_base64)
+        result = await pipeline.ingest_pdf_bytes(content_bytes, filename)
+        return json.dumps({"status": "success", "data": result.to_dict()})
+    except Exception as e:
+        logger.error("Ingestion failed", filename=filename, error=str(e))
+        return json.dumps({"status": "error", "error": str(e)})

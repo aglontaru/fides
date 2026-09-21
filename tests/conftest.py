@@ -24,9 +24,9 @@ def settings() -> FidesSettings:
 
 
 @pytest.fixture
-def mock_neo4j_driver() -> AsyncMock:
+def mock_neo4j_driver() -> MagicMock:
     """Mock of neo4j async driver with session and transaction mocks."""
-    driver = AsyncMock()
+    driver = MagicMock()
     session = AsyncMock()
     tx = AsyncMock()
 

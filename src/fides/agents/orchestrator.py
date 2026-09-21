@@ -1,25 +1,33 @@
-"""Orchestrator LangGraph agent setup."""
+"""Orchestrator Agent implementation using LangChain's DeepAgents framework.
+
+Coordinates autonomous sub-agents (Query, Indexing, Diff, Legal) to handle user intents,
+plan ToDo lists, execute tasks, assess quality, and deliver authoritative responses.
+"""
 
 from __future__ import annotations
 
-import json
-from typing import Annotated, Any, TypedDict
+from collections.abc import Sequence
+from typing import Any
 
 import structlog
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from deepagents.backends.state import StateBackend
+from deepagents.middleware.subagents import SubAgentMiddleware
+from langchain.agents import create_agent
+from langchain_core.tools import BaseTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 
-from fides.agents.prompts import (
-    GREETING_SYSTEM_PROMPT,
-    LEGAL_SYNTHESIS_SYSTEM_PROMPT,
-    LEGAL_SYNTHESIS_USER_INSTRUCTIONS,
-    QUERY_DECOMPOSITION_PROMPT,
+from fides.agents.contracts import IntentAnalysis, IntentEntities
+from fides.agents.prompts import ORCHESTRATOR_SYSTEM_PROMPT
+from fides.agents.sub_agents import (
+    create_diff_subagent,
+    create_graph_builder_subagent,
+    create_indexing_subagent,
+    create_legal_subagent,
+    create_query_subagent,
 )
-from fides.config import create_chat_model
-from fides.config.settings import FidesSettings
-from fides.mcp_server.tools.vector_tools import hybrid_search
+from fides.config.llm import create_agent_model
+from fides.config.settings import FidesSettings, get_settings
 
 logger = structlog.get_logger(__name__)
 
@@ -41,175 +49,143 @@ COMMON_GREETINGS = {
 }
 
 
-class FidesState(TypedDict):
-    """LangGraph state schema for Fides agent."""
-
-    messages: Annotated[list[BaseMessage], add_messages]
-    retrieved_context: str
-
-
-def route_intent(state: FidesState) -> str:
-    """Classify user intent into greeting or regulatory retrieval."""
-    if not state.get("messages"):
-        return "greeting_node"
-    last_msg = state["messages"][-1]
-    content = getattr(last_msg, "content", "")
-    if isinstance(content, list):
-        text = " ".join(str(p) for p in content)
-    else:
-        text = str(content)
+def is_simple_greeting(text: str) -> bool:
+    """Check whether a text message is a basic greeting that can bypass full legal review."""
     clean = text.strip().lower().rstrip("!.,?")
     words = clean.split()
+    return clean in COMMON_GREETINGS or (
+        len(words) <= 3 and any(w in words for w in ["hi", "hello", "hey", "greetings"])
+    )
 
-    if clean in COMMON_GREETINGS or (
-        len(words) <= 3 and any(w in words for w in ["hi", "hello", "hey"])
+
+def route_intent(text: str) -> IntentAnalysis:
+    """Heuristic / rule-based intent classification for fast path decisions."""
+    clean = text.strip().lower()
+    if is_simple_greeting(clean):
+        return IntentAnalysis(
+            intent_type="greeting",
+            entities=IntentEntities(),
+            requires_legal_review=False,
+            complexity="simple",
+            raw_message=text,
+        )
+
+    if any(keyword in clean for keyword in ["upload", "index", "add document", "parse pdf"]):
+        return IntentAnalysis(
+            intent_type="upload",
+            entities=IntentEntities(),
+            requires_legal_review=False,
+            complexity="simple",
+            raw_message=text,
+        )
+
+    if any(
+        keyword in clean for keyword in ["diff", "compare", "difference", "version", "amendment"]
     ):
-        return "greeting_node"
-    return "retrieve_node"
+        return IntentAnalysis(
+            intent_type="diff",
+            entities=IntentEntities(),
+            requires_legal_review=True,
+            complexity="multi_hop",
+            raw_message=text,
+        )
 
-
-async def greeting_node(state: FidesState) -> dict[str, Any]:
-    """Provide a direct, warm greeting explaining Fides capabilities."""
-    llm = create_chat_model()
-    prompt = [
-        SystemMessage(content=GREETING_SYSTEM_PROMPT),
-        *state["messages"],
-    ]
-    res = await llm.ainvoke(prompt)
-    return {"messages": [res]}
-
-
-async def retrieve_node(state: FidesState) -> dict[str, Any]:
-    """Decompose the query and perform multi-index hybrid retrieval from Neo4j."""
-    llm = create_chat_model()
-    user_query = ""
-    for msg in reversed(state.get("messages", [])):
-        if isinstance(msg, HumanMessage):
-            user_query = str(msg.content)
-            break
-
-    if not user_query:
-        return {"retrieved_context": ""}
-
-    # 1. Query decomposition for broad legal coverage
-    decomp_prompt = f"{QUERY_DECOMPOSITION_PROMPT}\n\nQuestion: {user_query}"
-    sub_queries = [user_query]
-    try:
-        raw_res = await llm.ainvoke([SystemMessage(content=decomp_prompt)])
-        raw_text = getattr(raw_res, "content", "")
-        if "[" in raw_text and "]" in raw_text:
-            parsed = json.loads(raw_text[raw_text.find("[") : raw_text.rfind("]") + 1])
-            if isinstance(parsed, list):
-                sub_queries.extend([str(q) for q in parsed if str(q).strip()])
-    except Exception as e:
-        logger.debug(f"Decomposition fallback: {e}")
-
-    # 2. Multi-pass search across sub-queries
-    all_provisions: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for sq in sub_queries[:6]:
-        try:
-            search_res = await hybrid_search(sq, top_k=6)
-            data = json.loads(search_res).get("data", [])
-            for p in data:
-                pid = p.get("provision_id")
-                if pid and pid not in seen:
-                    seen.add(pid)
-                    all_provisions.append(p)
-        except Exception as se:
-            logger.warning(f"Retrieval error for sub-query: {se}", query=sq)
-
-    all_provisions.sort(key=lambda x: x.get("score", 0.0), reverse=True)
-
-    # 3. Format provisions with accurate citation labels
-    blocks: list[str] = []
-    for p in all_provisions[:14]:
-        doc = p.get("document", "")
-        art_id = p.get("article_id", "")
-        art_num = art_id.rsplit(":", 1)[-1] if ":" in art_id else art_id
-        para_id = p.get("paragraph_id", "")
-        para_num = para_id.rsplit(":", 1)[-1] if ":para:" in para_id else ""
-
-        if art_num == "168" and para_num:
-            ref = f"[{doc}, Recital ({para_num})]"
-        else:
-            ref = f"[{doc}, Art. {art_num}]"
-            if para_num and para_num != art_num:
-                ref = f"[{doc}, Art. {art_num}, Para. {para_num}]"
-
-        txt = (p.get("text") or p.get("paragraph_text", "")).strip()[:1000]
-        if txt:
-            blocks.append(f"{ref}\n{txt}")
-
-    return {"retrieved_context": "\n\n---\n\n".join(blocks)}
-
-
-async def synthesize_node(state: FidesState) -> dict[str, Any]:
-    """Synthesize high-level, authoritative legal analysis grounded strictly in provisions."""
-    llm = create_chat_model()
-    user_query = ""
-    for msg in reversed(state.get("messages", [])):
-        if isinstance(msg, HumanMessage):
-            user_query = str(msg.content)
-            break
-
-    context = state.get("retrieved_context", "")
-
-    user_prompt = (
-        f"Authoritative Provisions from Knowledge Graph:\n\n{context}\n\n"
-        f"---\n\nUser Question:\n{user_query}\n\n"
-        f"{LEGAL_SYNTHESIS_USER_INSTRUCTIONS}"
+    return IntentAnalysis(
+        intent_type="question",
+        entities=IntentEntities(),
+        requires_legal_review=True,
+        complexity="multi_hop",
+        raw_message=text,
     )
-
-    res = await llm.ainvoke(
-        [
-            SystemMessage(content=LEGAL_SYNTHESIS_SYSTEM_PROMPT),
-            *state["messages"][:-1],
-            HumanMessage(content=user_prompt),
-        ]
-    )
-    return {"messages": [res]}
 
 
 async def create_orchestrator(
     settings: FidesSettings | None = None,
-) -> tuple[Any, Any]:
-    """Create and return the compiled LangGraph StateGraph orchestrator with MCP tools.
+    mcp_tools: Sequence[BaseTool] | None = None,
+) -> tuple[CompiledStateGraph[Any, Any, Any, Any], Any]:
+    """Create and return the autonomous DeepAgent orchestrator with configured sub-agents.
 
-    Returns a compiled LangGraph CompiledStateGraph that produces full
-    hierarchical traces in LangSmith.
+    Args:
+        settings: Application settings.
+        mcp_tools: Optional pre-loaded MCP tools (e.g. for testing).
+
+    Returns:
+        A tuple of (CompiledStateGraph, mcp_client).
     """
-    logger.info("Creating LangGraph orchestrator StateGraph")
-    if settings is None:
-        from fides.config.settings import get_settings
+    logger.info("Initializing Autonomous DeepAgent Orchestrator")
+    s = settings or get_settings()
 
-        settings = get_settings()
-
+    # Initialize MCP client with SSE transport
+    url = s.mcp_server_url
+    if url.endswith("/mcp"):
+        url = url[:-4] + "/sse"
     mcp_client = MultiServerMCPClient(
         {
             "fides_tools": {
-                "transport": "streamable_http",
-                "url": settings.mcp_server_url,
+                "transport": "sse",
+                "url": url,
             }
         }
     )
 
-    workflow = StateGraph(FidesState)
-    workflow.add_node("greeting_node", greeting_node)
-    workflow.add_node("retrieve_node", retrieve_node)
-    workflow.add_node("synthesize_node", synthesize_node)
+    # Fetch tools from MCP server if not provided
+    loaded_tools: list[BaseTool] = list(mcp_tools) if mcp_tools is not None else []
+    if not loaded_tools:
+        try:
+            tools_from_server = await mcp_client.get_tools()
+            loaded_tools = list(tools_from_server)
+            logger.info("Retrieved tools from MCP server", count=len(loaded_tools))
+        except Exception as e:
+            logger.warning(
+                "Could not fetch tools from MCP server (server might be offline)",
+                error=str(e),
+                url=s.mcp_server_url,
+            )
 
-    workflow.add_conditional_edges(
-        START,
-        route_intent,
-        {
-            "greeting_node": "greeting_node",
-            "retrieve_node": "retrieve_node",
-        },
+    # Configure the 5 autonomous sub-agents
+    query_sub = create_query_subagent(tools=loaded_tools, settings=s)
+    indexing_sub = create_indexing_subagent(tools=loaded_tools, settings=s)
+    graph_builder_sub = create_graph_builder_subagent(tools=loaded_tools, settings=s)
+    diff_sub = create_diff_subagent(tools=loaded_tools, settings=s)
+    legal_sub = create_legal_subagent(settings=s)
+
+    subagents = [query_sub, indexing_sub, graph_builder_sub, diff_sub, legal_sub]
+
+    # Resolve model for orchestrator (allowing per-agent override if configured)
+    model = create_agent_model("orchestrator", s)
+
+    # Build SubAgent middleware without filesystem or shell execution tools
+    subagent_middleware = SubAgentMiddleware(
+        backend=StateBackend(),
+        subagents=subagents,
     )
-    workflow.add_edge("greeting_node", END)
-    workflow.add_edge("retrieve_node", "synthesize_node")
-    workflow.add_edge("synthesize_node", END)
 
-    agent = workflow.compile()
+    # Build the Orchestrator with strict recursion limit to prevent infinite loops
+    agent = create_agent(
+        model=model,
+        system_prompt=ORCHESTRATOR_SYSTEM_PROMPT,
+        middleware=[subagent_middleware],
+        name="orchestrator",
+    ).with_config(
+        {
+            "recursion_limit": 6,
+            "metadata": {
+                "lc_agent_name": "orchestrator",
+            },
+        }
+    )
+
+    logger.info(
+        "Autonomous DeepAgent Orchestrator created successfully",
+        subagents=[s["name"] for s in subagents],
+    )
+
     return agent, mcp_client
+
+
+__all__ = [
+    "COMMON_GREETINGS",
+    "create_orchestrator",
+    "is_simple_greeting",
+    "route_intent",
+]

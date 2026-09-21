@@ -4,12 +4,64 @@ import logging
 from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from fides.agents.factory import AgentSystem, create_agent_system
 from fides.config.settings import get_settings
+from fides.ingestion.pipeline import IngestionResult
 
 logger = logging.getLogger(__name__)
+
+
+def format_ingestion_confirmation(ingest_result: IngestionResult, filename: str) -> str:
+    """Format an authoritative, structured confirmation for indexed legislation."""
+    status = ingest_result.status
+    if status == "new_document":
+        status_desc = "The document is now marked as 'new_document' within Fides."
+    elif status == "identical":
+        status_desc = (
+            "The document status remains 'identical' as no changes were made during indexing."
+        )
+    elif status == "updated_document":
+        status_desc = "The document status has been updated to 'updated_document'."
+    else:
+        status_desc = f"The document status is '{status}'."
+
+    short_name = ingest_result.short_name or "the regulation"
+
+    # Generate relevant sample questions based on the indexed provisions
+    sample_questions: list[str] = []
+    if ingest_result.articles_count > 0:
+        sample_questions.append(
+            f"What is the main scope and core requirements established under {short_name}?"
+        )
+        sample_questions.append(
+            f"What specific obligations, statutory exemptions, and liabilities apply under {short_name}?"
+        )
+    if ingest_result.recitals_count > 0:
+        sample_questions.append(
+            f"What legislative background, purposes, or principles are articulated in {short_name}?"
+        )
+    sample_questions.append(
+        f"What are the key defined terms and their legal definitions in {short_name}?"
+    )
+
+    questions_block = "\n".join(f"{idx}. {q}" for idx, q in enumerate(sample_questions, 1))
+
+    return (
+        f"I have confirmed that the legal document '{filename}' has been successfully indexed into the Fides knowledge graph. "
+        f"Here is a summary of what was done:\n\n"
+        f'- **Document Title**: "{ingest_result.document_title}"\n'
+        f"- **Identifier / Short Name**: {ingest_result.short_name}\n"
+        f"- **Status**: {status_desc}\n"
+        f"- **Indexed Provisions**:\n"
+        f"  - Articles: {ingest_result.articles_count}\n"
+        f"  - Paragraphs: {ingest_result.paragraphs_count}\n"
+        f"  - Recitals: {ingest_result.recitals_count}\n\n"
+        f"Here are some sample questions you can ask to explore this document:\n\n"
+        f"{questions_block}\n\n"
+        f"Feel free to ask specific questions or request citations from this document!"
+    )
 
 
 class ConnectionManager:
@@ -40,8 +92,6 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-
-
 
 
 async def handle_websocket(websocket: WebSocket) -> None:
@@ -90,73 +140,58 @@ async def handle_websocket(websocket: WebSocket) -> None:
                     )
 
                 try:
-                    settings = get_settings()
                     from neo4j import AsyncGraphDatabase
 
-                    from fides.ingestion.pipeline import IngestionPipeline
+                    from fides.ingestion import IngestionPipeline
 
-                    neo4j_driver = AsyncGraphDatabase.driver(
+                    settings = get_settings()
+                    driver = AsyncGraphDatabase.driver(
                         settings.neo4j_uri,
-                        auth=(
-                            settings.neo4j_user,
-                            settings.neo4j_password.get_secret_value(),
-                        ),
+                        auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
                     )
-                    pipeline = IngestionPipeline(driver=neo4j_driver, settings=settings)
-                    ingest_result = await pipeline.ingest_pdf_bytes(
-                        content_bytes=content_bytes,
-                        filename=filename,
-                        on_progress=progress_callback,
-                    )
-                    await neo4j_driver.close()
-
-                    # Provide feedback to the user and notify orchestrator
-                    short_name = ingest_result.short_name
-                    doc_title = ingest_result.document_title
-                    art_count = ingest_result.articles_count
-                    rec_count = ingest_result.recitals_count
-                    para_count = ingest_result.paragraphs_count
-
-                    stat_label = (
-                        "Added"
-                        if ingest_result.status == "new_document"
-                        else ("Updated" if ingest_result.status == "updated_document" else "Verified")
-                    )
-                    details_list = []
-                    if art_count:
-                        details_list.append(f"{art_count} articles")
-                    if rec_count:
-                        details_list.append(f"{rec_count} recitals")
-                    if para_count:
-                        details_list.append(f"{para_count} paragraphs")
-
-                    details_str = ", ".join(details_list) if details_list else "All provisions"
-
-                    confirm_msg = (
-                        f"✅ **Legislation Indexed: {short_name}**\n\n"
-                        f"- **Title**: {doc_title}\n"
-                        f"- **File**: `{filename}`\n"
-                        f"- **Status**: {stat_label} in knowledge graph\n"
-                        f"- **Content**: {details_str} with vector embeddings.\n\n"
-                        f"You can now ask regulatory questions or cross-reference provisions from **{short_name}**."
-                    )
-
-                    # Append to conversation history so the agent has context
-                    agent_system.conversation_history.append(
-                        AIMessage(
-                            content=(
-                                f"Document '{short_name}' ({doc_title}) has been indexed with "
-                                f"{details_str}. It is now available in the knowledge graph for questions."
-                            )
+                    try:
+                        pipeline = IngestionPipeline(driver=driver, settings=settings)
+                        ingest_result = await pipeline.ingest_pdf_bytes(
+                            content_bytes=content_bytes,
+                            filename=filename,
+                            on_progress=progress_callback,
                         )
+                    finally:
+                        await driver.close()
+
+                    if ingest_result.status == "error":
+                        await manager.send_error(
+                            f"Document processing failed: {ingest_result.message}", websocket
+                        )
+                        continue
+
+                    # Build authoritative, structured confirmation message
+                    confirmation_message = format_ingestion_confirmation(
+                        ingest_result, filename
                     )
 
                     await manager.send_message(
-                        {"type": "message", "content": confirm_msg}, websocket
+                        {"type": "stream", "content": confirmation_message},
+                        websocket,
+                    )
+                    await manager.send_message(
+                        {"type": "end", "content": confirmation_message},
+                        websocket,
+                    )
+
+                    # Update agent conversation history so subsequent user questions know
+                    # about the newly indexed document and its provisions!
+                    agent_system.conversation_history.append(
+                        HumanMessage(
+                            content=f"Uploaded document '{filename}' ({ingest_result.short_name})."
+                        )
+                    )
+                    agent_system.conversation_history.append(
+                        AIMessage(content=confirmation_message)
                     )
 
                 except Exception as ingest_err:
-                    logger.error(f"Ingestion failed: {ingest_err}", exc_info=True)
+                    logger.error(f"Document ingestion error: {ingest_err}", exc_info=True)
                     await manager.send_error(f"Failed to index document: {ingest_err}", websocket)
 
             else:
@@ -164,21 +199,37 @@ async def handle_websocket(websocket: WebSocket) -> None:
                 if not user_text.strip():
                     continue
 
+                # Check for optional attachments directly in chat messages
+                chat_attachments: list[bytes] = []
+                attachment_filename: str | None = payload.get("filename")
+                if "attachments" in payload and isinstance(payload["attachments"], list):
+                    for att in payload["attachments"]:
+                        try:
+                            if isinstance(att, str):
+                                chat_attachments.append(base64.b64decode(att))
+                        except Exception as att_err:
+                            logger.debug("Failed to decode attachment: %s", att_err)
+
                 async def progress_cb(status_text: str) -> None:
                     await manager.send_message(
                         {"type": "status", "content": status_text},
                         websocket,
                     )
 
-                response_chunks: list[str] = []
-                async for chunk in agent_system.chat(user_text, on_status=progress_cb):
-                    response_chunks.append(chunk)
+                chat_response_chunks: list[str] = []
+                async for chunk in agent_system.chat(
+                    user_text,
+                    attachments=chat_attachments or None,
+                    filename=attachment_filename,
+                    on_status=progress_cb,
+                ):
+                    chat_response_chunks.append(chunk)
                     await manager.send_message(
                         {"type": "stream", "content": chunk},
                         websocket,
                     )
 
-                full_response = "".join(response_chunks).strip()
+                full_response = "".join(chat_response_chunks).strip()
                 if not full_response:
                     full_response = (
                         "Hello! I am here to help you explore and understand EU legislation. "

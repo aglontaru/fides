@@ -22,12 +22,20 @@ from fides.graph.operations import (
     find_document_by_hash,
     find_document_by_name,
     get_document_chunks_manifest,
+    link_article_references_annex,
+    link_paragraph_uses_term,
+    upsert_actor_role,
+    upsert_annex,
     upsert_article,
+    upsert_defined_term,
     upsert_document,
+    upsert_obligation,
+    upsert_ontology_schema,
     upsert_paragraph,
     upsert_recital,
 )
 from fides.ingestion.chunkers.legislation import LegislationChunker
+from fides.ingestion.extractors.semantics import SemanticExtractor
 from fides.ingestion.extractors.structure import StructureExtractor
 from fides.ingestion.parsers.pdf import PDFParser
 
@@ -272,7 +280,9 @@ class IngestionPipeline:
                 recitals_updated += 1
             indexed_recitals += 1
             if indexed_recitals % 5 == 0 or indexed_recitals == total_recitals:
-                await _progress(f"Indexed {indexed_recitals}/{total_recitals} recitals into graph...")
+                await _progress(
+                    f"Indexed {indexed_recitals}/{total_recitals} recitals into graph..."
+                )
 
         # Upsert articles and paragraphs with change detection
         indexed_articles = 0
@@ -290,9 +300,7 @@ class IngestionPipeline:
             art_paras = paragraphs_dict.get(art_id, [])
 
             art_in_graph = art_id in existing_manifest["articles"]
-            art_is_unchanged = (
-                art_in_graph and existing_manifest["articles"][art_id] == art_hash
-            )
+            art_is_unchanged = art_in_graph and existing_manifest["articles"][art_id] == art_hash
 
             if art_is_unchanged:
                 articles_unchanged += 1
@@ -334,7 +342,9 @@ class IngestionPipeline:
                 try:
                     art_emb = await embeddings_model.aembed_query(art_text[:4000])
                 except Exception as emb_err:
-                    logger.warning("Failed embedding for article", art_id=art_id, error=str(emb_err))
+                    logger.warning(
+                        "Failed embedding for article", art_id=art_id, error=str(emb_err)
+                    )
 
                 article_node = ArticleNode(
                     id=art_id,
@@ -356,10 +366,7 @@ class IngestionPipeline:
                     p_text = p["text"]
                     p_hash = hashlib.sha256(p_text.encode("utf-8")).hexdigest()
                     p_in_graph = p["id"] in existing_manifest["paragraphs"]
-                    if (
-                        p_in_graph
-                        and existing_manifest["paragraphs"][p["id"]] == p_hash
-                    ):
+                    if p_in_graph and existing_manifest["paragraphs"][p["id"]] == p_hash:
                         paras_unchanged += 1
                         indexed_paras += 1
                         continue
@@ -399,6 +406,84 @@ class IngestionPipeline:
                 await _progress(
                     f"Processed {indexed_articles}/{total_articles} articles into graph..."
                 )
+
+        # 8. Semantic Entity & Relationship Extraction
+        await _progress("Extracting semantic entities (DefinedTerms, Obligations, ActorRoles)...")
+        sem_extractor = SemanticExtractor(short_name=short_name)
+        sem_result = sem_extractor.extract(chunked.chunks)
+
+        for role in sem_result.actor_roles:
+            try:
+                await upsert_actor_role(self.driver, role)
+            except Exception as e:
+                logger.debug("ActorRole upsert skipped", role=role.name, error=str(e))
+
+        for annex in sem_result.annex_nodes:
+            try:
+                annex_emb: list[float] | None = None
+                try:
+                    annex_content = f"{annex.title}\n\n{annex.text[:4000]}"
+                    annex_emb = await embeddings_model.aembed_query(annex_content)
+                except Exception as emb_e:
+                    logger.debug("Annex embedding skipped", annex_id=annex.id, error=str(emb_e))
+                annex.embedding = annex_emb
+                await upsert_annex(self.driver, doc_id=doc_id, annex=annex)
+            except Exception as e:
+                logger.debug("Annex upsert skipped", annex_id=annex.id, error=str(e))
+
+        for term in sem_result.defined_terms:
+            try:
+                def_art = next(
+                    (art_id for art_id, t_id in sem_result.article_defines if t_id == term.id),
+                    None,
+                )
+                if def_art:
+                    await upsert_defined_term(self.driver, article_id=def_art, term=term)
+            except Exception as e:
+                logger.debug("DefinedTerm upsert skipped", term=term.term, error=str(e))
+
+        for para_id, term_id in sem_result.paragraph_uses_term:
+            try:
+                await link_paragraph_uses_term(self.driver, paragraph_id=para_id, term_id=term_id)
+            except Exception as e:
+                logger.debug("USES_TERM link skipped", para_id=para_id, term_id=term_id, error=str(e))
+
+        obl_role_map = dict(sem_result.obligation_applies_to)
+        for obl in sem_result.obligations:
+            try:
+                imposing_art = next(
+                    (art_id for art_id, o_id in sem_result.article_imposes if o_id == obl.id),
+                    None,
+                )
+                if imposing_art:
+                    target_role = obl_role_map.get(obl.id)
+                    await upsert_obligation(
+                        self.driver,
+                        article_id=imposing_art,
+                        obligation=obl,
+                        actor_role_name=target_role,
+                    )
+            except Exception as e:
+                logger.debug("Obligation upsert skipped", obl_id=obl.id, error=str(e))
+
+        for art_id, annex_id in sem_result.article_references_annex:
+            try:
+                await link_article_references_annex(self.driver, article_id=art_id, annex_id=annex_id)
+            except Exception as e:
+                logger.debug("REFERENCES_ANNEX link skipped", art_id=art_id, annex_id=annex_id, error=str(e))
+
+        if sem_result.schema_record:
+            try:
+                await upsert_ontology_schema(
+                    self.driver,
+                    document_id=doc_id,
+                    domain=sem_result.schema_record.domain,
+                    node_types=sem_result.schema_record.node_types,
+                    relationship_types=sem_result.schema_record.relationship_types,
+                    description=sem_result.schema_record.description,
+                )
+            except Exception as e:
+                logger.debug("OntologySchema upsert skipped", doc_id=doc_id, error=str(e))
 
         if existing_doc:
             diff_parts = []

@@ -1,131 +1,140 @@
 # Knowledge Graph Schema
 
 This document describes the Neo4j knowledge graph schema used by Fides to
-model EU legislation documents.
+model legal documents, statutes, regulations, codes, and contracts from any jurisdiction.
 
 ## Design Principles
 
-1. **Legislation-native hierarchy** — The graph follows the official legal
-   document structure (Title → Chapter → Section → Article → Paragraph),
-   not arbitrary token-based chunks.
+1. **Legislation-Native Hierarchy** — The graph preserves the official legal
+   document structure (Title → Chapter → Section → Article → Paragraph, plus Annex and Recital),
+   avoiding arbitrary token-slicing that destroys statutory context.
 
-2. **Dual-layer architecture** — Structural backbone (document AST) is
-   separated from semantic/normative layer (obligations, defined terms,
-   cross-references).
+2. **Dual-Layer Architecture** — The structural backbone (document AST) is
+   complemented by a dynamic semantic/normative layer (obligations, defined terms, actor roles,
+   cross-references, and domain-specific entities) discovered at ingestion time.
 
-3. **Content hashing for dedup** — Every node carries a SHA-256 hash of its
-   normalised text content. This enables Merkle-tree-style change detection
-   during re-indexing.
+3. **Dynamic Ontology Discovery** — Governed by the autonomous **Graph Builder Agent**,
+   the semantic layer adapts dynamically to each ingested document without hardcoded jurisdiction assumptions.
 
-4. **Embedded vectors for RAG** — Article and Paragraph nodes carry vector
-   embeddings for semantic similarity search via Neo4j Vector Index.
+4. **Merkle-Tree Content Hashing** — Every node carries a SHA-256 hash of its
+   normalized text content, enabling instant change detection and targeted re-indexing.
+
+5. **Multi-Index Reciprocal Rank Fusion (RRF)** — Articles, Paragraphs, Annexes, and Recitals
+   carry dense vector embeddings (768 dimensions) and Lucene fulltext indexes, queried
+   simultaneously using RRF score fusion (`1 / (60 + rank)`).
+
+---
 
 ## Node Types
 
-### Document Structure (Lexical Layer)
+### 1. Structural Layer (Universal Legislative AST)
 
 | Label | Key Properties | Description |
-|-------|---------------|-------------|
-| `Document` | `id`, `title`, `short_name`, `document_type`, `publication_date`, `content_hash`, `indexed_at`, `version`, `eli_uri` | Top-level regulation |
-| `Recital` | `id`, `number`, `text`, `embedding` | Preamble items stating legislative intent |
-| `Chapter` | `id`, `number`, `title` | Thematic grouping |
+| :--- | :--- | :--- |
+| `Document` | `id`, `title`, `short_name`, `document_type`, `publication_date`, `content_hash`, `indexed_at`, `version`, `eli_uri` | Root legal instrument (statute, regulation, code, contract) |
+| `Chapter` | `id`, `number`, `title` | Major thematic division |
 | `Section` | `id`, `number`, `title` | Sub-division within chapters |
-| `Article` | `id`, `number`, `title`, `full_text`, `embedding`, `content_hash` | Core operational unit |
-| `Paragraph` | `id`, `number`, `text`, `embedding`, `content_hash` | Numbered paragraph within an article |
-| `Annex` | `id`, `number`, `title`, `text`, `embedding` | Appendices |
+| `Article` | `id`, `number`, `title`, `full_text`, `embedding`, `content_hash` | Core operational statutory unit |
+| `Paragraph` | `id`, `number`, `text`, `embedding`, `content_hash` | Numbered provision within an article |
+| `Annex` | `id`, `number`, `title`, `text`, `embedding` | Schedules, appendices, and procedural protocols |
+| `Recital` | `id`, `number`, `text`, `embedding` | Preambles, legislative statements of purpose, and statutory intent |
 
-### Semantic Layer
+### 2. Semantic & Normative Layer (Dynamic Discovery)
 
 | Label | Key Properties | Description |
-|-------|---------------|-------------|
-| `DefinedTerm` | `id`, `term`, `normalized_term`, `definition` | Legal definitions (typically Art. 2-3) |
-| `Obligation` | `id`, `modality`, `description` | Compliance duties ("shall", "must") |
-| `ActorRole` | `id`, `name` | Regulated entities ("Provider", "Deployer") |
+| :--- | :--- | :--- |
+| `DefinedTerm` | `id`, `term`, `normalized_term`, `definition` | Legal definitions discovered from definitions provisions |
+| `Obligation` | `id`, `modality` (`MUST`, `SHALL`, `MAY`, `PROHIBITED`), `description` | Operative compliance duties and legal requirements |
+| `ActorRole` | `id`, `name` | Legal entities and regulated actors (e.g., `Manufacturer`, `Authorised Representative`, `Borrower`) |
+
+---
 
 ## Relationship Types
 
-### Structural Relationships
-
+### Structural Hierarchy
 ```cypher
 (Document)-[:HAS_CHAPTER]->(Chapter)
 (Document)-[:HAS_RECITAL]->(Recital)
 (Document)-[:HAS_ANNEX]->(Annex)
 (Chapter)-[:HAS_SECTION]->(Section)
-(Chapter)-[:HAS_ARTICLE]->(Article)       // Direct, when no sections
+(Chapter)-[:HAS_ARTICLE]->(Article)
 (Section)-[:HAS_ARTICLE]->(Article)
 (Article)-[:HAS_PARAGRAPH]->(Paragraph)
 ```
 
-### Reading Order
-
+### Sequential Reading Order
 ```cypher
 (Article)-[:NEXT_ARTICLE]->(Article)
 (Paragraph)-[:NEXT_PARAGRAPH]->(Paragraph)
 ```
 
-### Cross-References
-
+### Statutory Cross-References & Citations
 ```cypher
 (Article)-[:CITES {ref_text: "..."}]->(Article)
 (Article)-[:REFERENCES_ANNEX]->(Annex)
 (Article)-[:INTERPRETED_BY]->(Recital)
-(Article)-[:AMENDS]->(Article)             // Cross-regulation
+(Article)-[:AMENDS]->(Article)
 ```
 
-### Normative Relationships
-
+### Normative & Semantic Links
 ```cypher
 (Article)-[:DEFINES]->(DefinedTerm)
 (Paragraph)-[:USES_TERM]->(DefinedTerm)
 (Paragraph)-[:IMPOSES]->(Obligation)
 (Obligation)-[:APPLIES_TO]->(ActorRole)
+(Obligation)-[:EXEMPTS_FROM]->(ActorRole)
 ```
 
-## Indexes
+---
 
-### Constraints (Uniqueness)
+## Indexes & Constraints
 
+### Uniqueness Constraints
 ```cypher
-CREATE CONSTRAINT FOR (d:Document) REQUIRE d.id IS UNIQUE;
-CREATE CONSTRAINT FOR (a:Article) REQUIRE a.id IS UNIQUE;
-CREATE CONSTRAINT FOR (p:Paragraph) REQUIRE p.id IS UNIQUE;
-CREATE CONSTRAINT FOR (r:Recital) REQUIRE r.id IS UNIQUE;
-CREATE CONSTRAINT FOR (x:Annex) REQUIRE x.id IS UNIQUE;
-CREATE CONSTRAINT FOR (t:DefinedTerm) REQUIRE t.normalized_term IS UNIQUE;
+CREATE CONSTRAINT document_id IF NOT EXISTS FOR (n:Document) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT recital_id IF NOT EXISTS FOR (n:Recital) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT chapter_id IF NOT EXISTS FOR (n:Chapter) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT section_id IF NOT EXISTS FOR (n:Section) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT article_id IF NOT EXISTS FOR (n:Article) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT paragraph_id IF NOT EXISTS FOR (n:Paragraph) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT annex_id IF NOT EXISTS FOR (n:Annex) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT term_id IF NOT EXISTS FOR (n:DefinedTerm) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT obligation_id IF NOT EXISTS FOR (n:Obligation) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT actor_role_id IF NOT EXISTS FOR (n:ActorRole) REQUIRE n.id IS UNIQUE;
 ```
 
 ### Fulltext Indexes
-
 ```cypher
-CREATE FULLTEXT INDEX article_fulltext
-  FOR (a:Article) ON EACH [a.title, a.full_text];
-
-CREATE FULLTEXT INDEX paragraph_fulltext
-  FOR (p:Paragraph) ON EACH [p.text];
+CREATE FULLTEXT INDEX article_text IF NOT EXISTS FOR (n:Article) ON EACH [n.title, n.full_text];
+CREATE FULLTEXT INDEX paragraph_text IF NOT EXISTS FOR (n:Paragraph) ON EACH [n.text];
+CREATE FULLTEXT INDEX recital_text IF NOT EXISTS FOR (n:Recital) ON EACH [n.text];
+CREATE FULLTEXT INDEX annex_text IF NOT EXISTS FOR (n:Annex) ON EACH [n.title, n.text];
 ```
 
-### Vector Indexes
-
+### Vector Indexes (Cosine Similarity, 768 Dimensions)
 ```cypher
-CREATE VECTOR INDEX paragraph_embeddings
-  FOR (p:Paragraph) ON (p.embedding)
-  OPTIONS {indexConfig: {
-    `vector.dimensions`: 768,
-    `vector.similarity_function`: 'cosine'
-  }};
+CREATE VECTOR INDEX vector_Article IF NOT EXISTS
+  FOR (n:Article) ON (n.embedding)
+  OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}};
 
-CREATE VECTOR INDEX recital_embeddings
-  FOR (r:Recital) ON (r.embedding)
-  OPTIONS {indexConfig: {
-    `vector.dimensions`: 768,
-    `vector.similarity_function`: 'cosine'
-  }};
+CREATE VECTOR INDEX vector_Paragraph IF NOT EXISTS
+  FOR (n:Paragraph) ON (n.embedding)
+  OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}};
+
+CREATE VECTOR INDEX vector_Recital IF NOT EXISTS
+  FOR (n:Recital) ON (n.embedding)
+  OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}};
+
+CREATE VECTOR INDEX vector_Annex IF NOT EXISTS
+  FOR (n:Annex) ON (n.embedding)
+  OPTIONS {indexConfig: {`vector.dimensions`: 768, `vector.similarity_function`: 'cosine'}};
 ```
+
+---
 
 ## ID Conventions
 
 Node IDs follow a deterministic hierarchical pattern:
-
 ```
 Document:  {short_name}
 Chapter:   {short_name}:chapter:{number}
@@ -137,19 +146,21 @@ Annex:     {short_name}:annex:{number}
 ```
 
 Examples:
-- `EU_AI_ACT_2024_1689:art:6` — Article 6 of the EU AI Act
-- `EU_AI_ACT_2024_1689:art:6:para:2` — Paragraph 2 of Article 6
-- `EU_AI_ACT_2024_1689:recital:47` — Recital 47
+- `MDR:art:20` — Article 20 of the Medical Device Regulation
+- `MDR:art:20:para:1` — Paragraph 1 of Article 20 (CE marking rule and custom-made exemption)
+- `MDR:annex:XIII` — Annex XIII (Procedure for custom-made devices)
+- `EU_AI_ACT:art:6:para:2` — Paragraph 2 of Article 6 of the EU AI Act
 
-## Change Detection (Merkle Hashing)
+---
+
+## Merkle-Tree Change Detection
 
 Content hashes are computed bottom-up:
-
 1. `hash(Paragraph) = SHA256(normalize(text))`
 2. `hash(Article) = SHA256(title + sorted(paragraph_hashes))`
 3. `hash(Document) = SHA256(sorted(article_hashes))`
 
 During re-indexing:
-- **Same hash** → skip (no re-embedding, no LLM cost)
-- **Different hash** → drill down to find changed paragraphs
-- Only changed nodes get new embeddings and updated relationships
+- **Identical hash**: Skipped immediately with zero embedding or LLM cost.
+- **Different hash**: Drills down to identify precisely which articles and paragraphs changed.
+- Only changed provisions are updated in the graph and re-embedded.

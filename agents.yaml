@@ -1,0 +1,62 @@
+# ==============================================================================
+# Fides Agent Limits and Runtime Configuration
+# ==============================================================================
+# Adjust model selection, timeouts, retry limits, and tool budgets for each agent.
+# Models can be specified as:
+#   - "ollama:model_name" (e.g. "ollama:qwen2.5:7b", "ollama:qwen2.5:3b")
+#   - "gemini:model_name" (e.g. "gemini:gemini-2.5-flash", "gemini:gemini-2.0-pro")
+#   - or leave as null to inherit the global default LLM from .env / settings.
+# ==============================================================================
+
+agents:
+  orchestrator:
+    model: null                  # Inherits default LLM (e.g. qwen2.5:7b)
+    temperature: 0.0
+    timeout_seconds: 120
+    max_retries: 2
+    max_tool_calls: 10
+    description: "Master coordinator and intent planner"
+
+  query:
+    model: null                  # Set specific model or null for default
+    temperature: 0.0
+    timeout_seconds: 90
+    max_retries: 2
+    max_tool_calls: 8
+    description: "Legal retrieval specialist across vectors and graph"
+
+  legal:
+    model: null                  # Set specific model (e.g. larger reasoning model) or null
+    temperature: 0.0
+    timeout_seconds: 120
+    max_retries: 2
+    max_tool_calls: 6
+    description: "Mandatory quality gate, evidence critique, and citation drafter"
+
+  indexing:
+    model: null
+    temperature: 0.0
+    timeout_seconds: 180
+    max_retries: 2
+    max_tool_calls: 12
+    description: "Ingestion and document lifecycle manager"
+
+  graph_builder:
+    model: null
+    temperature: 0.0
+    timeout_seconds: 180
+    max_retries: 2
+    max_tool_calls: 12
+    description: "Dynamic ontology discovery and knowledge graph expander"
+
+  diff:
+    model: null
+    temperature: 0.0
+    timeout_seconds: 90
+    max_retries: 2
+    max_tool_calls: 6
+    description: "Document version comparison and normative impact specialist"
+
+global:
+  max_conversation_tokens: 16000
+  enable_deliberation_gate: true   # Ensures substantive legal queries pass through Legal review

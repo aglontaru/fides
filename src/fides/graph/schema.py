@@ -43,6 +43,10 @@ def get_schema_statements(embedding_dimensions: int = 768) -> list[str]:
         CREATE FULLTEXT INDEX recital_text IF NOT EXISTS
         FOR (n:Recital) ON EACH [n.text];
         """,
+        """
+        CREATE FULLTEXT INDEX annex_text IF NOT EXISTS
+        FOR (n:Annex) ON EACH [n.title, n.text];
+        """,
         # Vector Indexes
         f"""
         CREATE VECTOR INDEX vector_Article IF NOT EXISTS

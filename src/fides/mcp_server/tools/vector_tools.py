@@ -54,12 +54,12 @@ async def vector_search(query_text: str, top_k: int = 5, node_type: str = "Parag
 
 
 @mcp.tool()
-async def hybrid_search(query_text: str, top_k: int = 8) -> str:
+async def hybrid_search(query_text: str, top_k: int = 15) -> str:
     """Combined vector + fulltext + graph context expansion RAG retrieval tool.
 
-    Searches legislative Paragraphs, Articles, and Recitals using both vector
-    embeddings and fulltext keyword matching, then expands context via graph
-    relationships.
+    Searches legislative Paragraphs, Articles, Annexes, and Recitals across any
+    jurisdiction using both vector embeddings and universal fulltext keyword matching,
+    merging results via Reciprocal Rank Fusion (RRF) and expanding context via graph relationships.
 
     DO NOT call this tool for greetings, pleasantries, small talk, or queries
     unrelated to legal provisions.
@@ -68,7 +68,7 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
 
     Args:
         query_text: The semantic search query.
-        top_k: Number of provisions to retrieve per index before merging.
+        top_k: Number of provisions to retrieve per index before RRF merging (default 15).
 
     Returns:
         JSON string containing structured RAG context.
@@ -79,7 +79,24 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
         vector = await embeddings_model.aembed_query(query_text)
         driver = await deps.get_neo4j_driver()
 
-        combined_records: list[dict[str, Any]] = []
+        # RRF (Reciprocal Rank Fusion) ranking structures
+        rrf_k = 60.0
+        rrf_scores: dict[str, float] = {}
+        vector_similarities: dict[str, float] = {}
+        records_by_id: dict[str, dict[str, Any]] = {}
+
+        def _add_ranked_list(records: list[dict[str, Any]], is_vector: bool = False) -> None:
+            for rank, rec in enumerate(records):
+                pid = rec.get("provision_id")
+                if not pid:
+                    continue
+                rrf_contrib = 1.0 / (rrf_k + rank + 1.0)
+                rrf_scores[pid] = rrf_scores.get(pid, 0.0) + rrf_contrib
+                if is_vector:
+                    sim = float(rec.get("score", 0.0))
+                    vector_similarities[pid] = max(vector_similarities.get(pid, 0.0), sim)
+                if pid not in records_by_id:
+                    records_by_id[pid] = rec
 
         async with driver.session() as session:
             # 1. Vector search: Paragraphs
@@ -90,6 +107,7 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                 "OPTIONAL MATCH (d:Document)-[:HAS_ARTICLE*]->(a) "
                 "OPTIONAL MATCH (c:Chapter)-[:HAS_ARTICLE]->(a) "
                 "OPTIONAL MATCH (a)-[:CITES]->(ca:Article) "
+                "OPTIONAL MATCH (a)-[:REFERENCES_ANNEX]->(an:Annex) "
                 "RETURN 'paragraph' AS type, "
                 "       p.id AS paragraph_id, "
                 "       p.id AS provision_id, "
@@ -100,23 +118,24 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                 "       a.title AS article_title, "
                 "       coalesce(d.short_name, d.title, '') AS document, "
                 "       c.title AS chapter_title, "
-                "       collect(DISTINCT ca.id) AS cited_articles "
+                "       collect(DISTINCT ca.id) AS cited_articles, "
+                "       collect(DISTINCT an.id) AS referenced_annexes "
                 "ORDER BY score DESC"
             )
             try:
                 result_para = await session.run(cypher_para, {"top_k": top_k, "vector": vector})
-                para_records = [record.data() async for record in result_para]
-                combined_records.extend(para_records)
+                _add_ranked_list([record.data() async for record in result_para], is_vector=True)
             except Exception as pe:
                 logger.warning("Paragraph vector search failed", error=str(pe))
 
-            # 2. Vector search: Articles (many articles have no child paragraphs)
+            # 2. Vector search: Articles
             cypher_art = (
                 "CALL db.index.vector.queryNodes('vector_Article', $top_k, $vector) "
                 "YIELD node AS a, score "
                 "OPTIONAL MATCH (d:Document)-[:HAS_ARTICLE*]->(a) "
                 "OPTIONAL MATCH (c:Chapter)-[:HAS_ARTICLE]->(a) "
                 "OPTIONAL MATCH (a)-[:CITES]->(ca:Article) "
+                "OPTIONAL MATCH (a)-[:REFERENCES_ANNEX]->(an:Annex) "
                 "RETURN 'article' AS type, "
                 "       a.id AS paragraph_id, "
                 "       a.id AS provision_id, "
@@ -127,17 +146,42 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                 "       a.title AS article_title, "
                 "       coalesce(d.short_name, d.title, '') AS document, "
                 "       coalesce(c.title, '') AS chapter_title, "
-                "       collect(DISTINCT ca.id) AS cited_articles "
+                "       collect(DISTINCT ca.id) AS cited_articles, "
+                "       collect(DISTINCT an.id) AS referenced_annexes "
                 "ORDER BY score DESC"
             )
             try:
                 result_art = await session.run(cypher_art, {"top_k": top_k, "vector": vector})
-                art_records = [record.data() async for record in result_art]
-                combined_records.extend(art_records)
+                _add_ranked_list([record.data() async for record in result_art], is_vector=True)
             except Exception as ae:
                 logger.warning("Article vector search failed", error=str(ae))
 
-            # 3. Vector search: Recitals
+            # 3. Vector search: Annexes
+            cypher_annex_vec = (
+                "CALL db.index.vector.queryNodes('vector_Annex', $top_k, $vector) "
+                "YIELD node AS an, score "
+                "OPTIONAL MATCH (d:Document)-[:HAS_ANNEX]->(an) "
+                "RETURN 'annex' AS type, "
+                "       an.id AS paragraph_id, "
+                "       an.id AS provision_id, "
+                "       an.text AS paragraph_text, "
+                "       an.text AS text, "
+                "       score, "
+                "       an.id AS article_id, "
+                "       an.title AS article_title, "
+                "       coalesce(d.short_name, d.title, '') AS document, "
+                "       '' AS chapter_title, "
+                "       [] AS cited_articles, "
+                "       [] AS referenced_annexes "
+                "ORDER BY score DESC"
+            )
+            try:
+                result_annex_vec = await session.run(cypher_annex_vec, {"top_k": top_k, "vector": vector})
+                _add_ranked_list([record.data() async for record in result_annex_vec], is_vector=True)
+            except Exception as ave:
+                logger.warning("Annex vector search failed", error=str(ave))
+
+            # 4. Vector search: Recitals
             cypher_rec = (
                 "CALL db.index.vector.queryNodes('vector_Recital', $top_k, $vector) "
                 "YIELD node AS r, score "
@@ -152,37 +196,38 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                 "       coalesce(r.title, 'Recital (' + coalesce(r.number, '') + ')') AS article_title, "
                 "       coalesce(d.short_name, d.title, '') AS document, "
                 "       '' AS chapter_title, "
-                "       [] AS cited_articles "
+                "       [] AS cited_articles, "
+                "       [] AS referenced_annexes "
                 "ORDER BY score DESC"
             )
             try:
                 result_rec = await session.run(cypher_rec, {"top_k": top_k, "vector": vector})
-                rec_records = [record.data() async for record in result_rec]
-                combined_records.extend(rec_records)
+                _add_ranked_list([record.data() async for record in result_rec], is_vector=True)
             except Exception as re_err:
                 logger.warning("Recital vector search failed", error=str(re_err))
 
-            # 4. Fulltext keyword fallback: articles
-            # Extracts key terms for exact matching (catches exemption language)
+            # 5. Fulltext keyword search: articles
             ft_query = _build_fulltext_query(query_text)
             if ft_query:
                 cypher_ft_art = (
                     "CALL db.index.fulltext.queryNodes('article_text', $query) "
                     "YIELD node AS a, score "
-                    "WHERE score > 1.5 "
                     "OPTIONAL MATCH (d:Document)-[:HAS_ARTICLE*]->(a) "
                     "OPTIONAL MATCH (c:Chapter)-[:HAS_ARTICLE]->(a) "
+                    "OPTIONAL MATCH (a)-[:CITES]->(ca:Article) "
+                    "OPTIONAL MATCH (a)-[:REFERENCES_ANNEX]->(an:Annex) "
                     "RETURN 'article_ft' AS type, "
                     "       a.id AS paragraph_id, "
                     "       a.id AS provision_id, "
                     "       a.full_text AS paragraph_text, "
                     "       a.full_text AS text, "
-                    "       score * 0.1 AS score, "  # Normalize FT score to ~0-1 range
+                    "       score, "
                     "       a.id AS article_id, "
                     "       a.title AS article_title, "
                     "       coalesce(d.short_name, d.title, '') AS document, "
                     "       coalesce(c.title, '') AS chapter_title, "
-                    "       [] AS cited_articles "
+                    "       collect(DISTINCT ca.id) AS cited_articles, "
+                    "       collect(DISTINCT an.id) AS referenced_annexes "
                     "ORDER BY score DESC "
                     "LIMIT $top_k"
                 )
@@ -190,29 +235,30 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                     result_ft = await session.run(
                         cypher_ft_art, {"query": ft_query, "top_k": top_k}
                     )
-                    ft_records = [record.data() async for record in result_ft]
-                    combined_records.extend(ft_records)
+                    _add_ranked_list([record.data() async for record in result_ft], is_vector=False)
                 except Exception as ft_err:
                     logger.warning("Fulltext article search failed", error=str(ft_err))
 
-                # 5. Fulltext keyword fallback: paragraphs
+                # 6. Fulltext keyword search: paragraphs
                 cypher_ft_para = (
                     "CALL db.index.fulltext.queryNodes('paragraph_text', $query) "
                     "YIELD node AS p, score "
-                    "WHERE score > 1.5 "
                     "MATCH (a:Article)-[:HAS_PARAGRAPH]->(p) "
                     "OPTIONAL MATCH (d:Document)-[:HAS_ARTICLE*]->(a) "
+                    "OPTIONAL MATCH (a)-[:CITES]->(ca:Article) "
+                    "OPTIONAL MATCH (a)-[:REFERENCES_ANNEX]->(an:Annex) "
                     "RETURN 'paragraph_ft' AS type, "
                     "       p.id AS paragraph_id, "
                     "       p.id AS provision_id, "
                     "       p.text AS paragraph_text, "
                     "       p.text AS text, "
-                    "       score * 0.1 AS score, "
+                    "       score, "
                     "       a.id AS article_id, "
                     "       a.title AS article_title, "
                     "       coalesce(d.short_name, d.title, '') AS document, "
                     "       '' AS chapter_title, "
-                    "       [] AS cited_articles "
+                    "       collect(DISTINCT ca.id) AS cited_articles, "
+                    "       collect(DISTINCT an.id) AS referenced_annexes "
                     "ORDER BY score DESC "
                     "LIMIT $top_k"
                 )
@@ -220,25 +266,55 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
                     result_ft_p = await session.run(
                         cypher_ft_para, {"query": ft_query, "top_k": top_k}
                     )
-                    ft_p_records = [record.data() async for record in result_ft_p]
-                    combined_records.extend(ft_p_records)
+                    _add_ranked_list([record.data() async for record in result_ft_p], is_vector=False)
                 except Exception as ft_p_err:
                     logger.warning("Fulltext paragraph search failed", error=str(ft_p_err))
 
-        # Deduplicate and sort by score descending
-        seen_ids: set[str] = set()
-        deduped: list[dict[str, Any]] = []
-        for rec in sorted(combined_records, key=lambda x: x.get("score", 0.0), reverse=True):
-            pid = rec.get("provision_id", "")
-            if pid and pid not in seen_ids:
-                seen_ids.add(pid)
-                deduped.append(rec)
+                # 7. Fulltext keyword search: annexes
+                cypher_ft_annex = (
+                    "CALL db.index.fulltext.queryNodes('annex_text', $query) "
+                    "YIELD node AS an, score "
+                    "OPTIONAL MATCH (d:Document)-[:HAS_ANNEX]->(an) "
+                    "RETURN 'annex_ft' AS type, "
+                    "       an.id AS paragraph_id, "
+                    "       an.id AS provision_id, "
+                    "       an.text AS paragraph_text, "
+                    "       an.text AS text, "
+                    "       score, "
+                    "       an.id AS article_id, "
+                    "       an.title AS article_title, "
+                    "       coalesce(d.short_name, d.title, '') AS document, "
+                    "       '' AS chapter_title, "
+                    "       [] AS cited_articles, "
+                    "       [] AS referenced_annexes "
+                    "ORDER BY score DESC "
+                    "LIMIT $top_k"
+                )
+                try:
+                    result_ft_ann = await session.run(
+                        cypher_ft_annex, {"query": ft_query, "top_k": top_k}
+                    )
+                    _add_ranked_list([record.data() async for record in result_ft_ann], is_vector=False)
+                except Exception as ft_ann_err:
+                    logger.warning("Fulltext annex search failed", error=str(ft_ann_err))
 
-        top_results = deduped[: top_k * 2]  # Return more results for multi-query merging
+        # Calculate final RRF blended score and sort
+        scored_records: list[dict[str, Any]] = []
+        for pid, rec in records_by_id.items():
+            base_rrf = rrf_scores.get(pid, 0.0)
+            vec_sim = vector_similarities.get(pid, 0.0)
+            # Blended score: RRF + 0.3 * vector similarity bonus
+            blended_score = round(base_rrf + (0.3 * vec_sim), 4)
+            record_copy = dict(rec)
+            record_copy["score"] = blended_score
+            scored_records.append(record_copy)
+
+        scored_records.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        top_results = scored_records[: max(top_k * 2, 25)]
+
         logger.info(
-            "Hybrid search complete",
-            total_candidates=len(combined_records),
-            deduped=len(deduped),
+            "Hybrid search complete with RRF fusion",
+            unique_candidates=len(records_by_id),
             returned=len(top_results),
         )
         return json.dumps({"status": "success", "data": top_results})
@@ -248,41 +324,94 @@ async def hybrid_search(query_text: str, top_k: int = 8) -> str:
 
 
 def _build_fulltext_query(query_text: str) -> str:
-    """Extract key legal terms from query for fulltext index search.
+    """Extract key legal and domain terms from query for universal Lucene fulltext search.
 
-    Builds a Lucene query string targeting legal domain terms that
-    semantic embeddings often miss (exemptions, negative clauses).
+    Dynamically extracts quoted phrases, statutory references (Articles, Sections, Annexes),
+    classification patterns (e.g. Class IIa, Class III), legal actor roles, and significant terms.
     """
-    # Extract meaningful multi-word and legal terms
-    query_lower = query_text.lower()
+    import re
+
     ft_terms: list[str] = []
+    seen: set[str] = set()
 
-    # Legal domain keywords to always search if present
-    legal_keywords = [
-        "custom-made", "investigational", "exemption", "exempt", "exception",
-        "shall not", "does not apply", "other than", "excluded",
-        "CE marking", "UDI", "conformity", "declaration", "notified body",
-        "authorised representative", "authorized representative",
-        "importer", "liability", "joint", "Annex XIII", "Annex IX",
-        "SSCP", "safety and clinical performance",
+    # 1. Exact phrases in quotes
+    for quoted in re.findall(r'"([^"]+)"', query_text):
+        q_clean = quoted.strip()
+        if q_clean and q_clean.lower() not in seen:
+            ft_terms.append(f'"{q_clean}"^3.0')
+            seen.add(q_clean.lower())
+
+    # 2. Structural & legal reference patterns across jurisdictions (boosted)
+    # e.g. "Article 10", "Art. 20", "Section 4", "Annex XIII", "Chapter II", "Rule 12", "Class III"
+    ref_patterns = [
+        r"\b(?:article|art\.?)\s+\d+[a-z]?\b",
+        r"\b(?:section|sec\.?)\s+\d+[a-z]?\b",
+        r"\b(?:annex|schedule|appendix|exhibit)\s+[ivxlcdm0-9]+\b",
+        r"\b(?:chapter|title|part)\s+[ivxlcdm0-9]+\b",
+        r"\bclass\s+(?:i{1,3}[ab]?|iv|v)\b",
     ]
-    for kw in legal_keywords:
-        if kw.lower() in query_lower:
-            ft_terms.append(f'"{kw}"')
+    for pattern in ref_patterns:
+        for match in re.finditer(pattern, query_text, re.IGNORECASE):
+            m_text = match.group(0).strip()
+            if m_text.lower() not in seen:
+                ft_terms.append(f'"{m_text}"^2.5')
+                seen.add(m_text.lower())
 
-    # Also add significant individual words (>3 chars, not stopwords)
+    # 3. Universal legal qualifiers and operative status phrases (boosted)
+    high_priority_qualifiers = [
+        "custom-made",
+        "investigational",
+        "exemption",
+        "exempt",
+        "exception",
+        "shall not apply",
+        "does not apply",
+        "other than",
+        "joint liability",
+        "several liability",
+        "declaration of conformity",
+        "conformity assessment",
+    ]
+    query_lower = query_text.lower()
+    for sq in high_priority_qualifiers:
+        if sq in query_lower and sq not in seen:
+            ft_terms.append(f'"{sq}"^2.0')
+            seen.add(sq)
+
+    general_actors = [
+        "notified body",
+        "authorised representative",
+        "authorized representative",
+        "manufacturer",
+        "importer",
+        "distributor",
+        "operator",
+        "controller",
+        "processor",
+    ]
+    for ga in general_actors:
+        if ga in query_lower and ga not in seen:
+            ft_terms.append(f'"{ga}"^1.0')
+            seen.add(ga)
+
+    # 4. Significant individual domain tokens (>2 chars, not common stopwords)
     stopwords = {
         "the", "and", "for", "are", "with", "from", "that", "this", "which",
         "what", "does", "how", "who", "when", "where", "about", "their",
         "have", "been", "being", "into", "across", "between", "specific",
         "specifically", "identify", "exact", "requirements", "obligations",
+        "under", "such", "some", "more", "also", "each", "will", "would",
+        "could", "should", "than", "then", "must", "they", "them", "these",
     }
-    for word in query_text.split():
-        clean = word.strip(".,;:!?()[]\"'").lower()
-        if len(clean) > 3 and clean not in stopwords and clean not in [t.strip('"').lower() for t in ft_terms]:
-            ft_terms.append(clean)
+    clean_words = re.findall(r"\b[A-Za-z0-9_-]{3,}\b", query_text)
+    for word in clean_words:
+        w_lower = word.lower()
+        if w_lower not in stopwords and w_lower not in seen:
+            escaped = re.sub(r'([+\-!(){}[\]^"~*?:\\/])', r'\\\1', word)
+            ft_terms.append(f"{escaped}^0.8")
+            seen.add(w_lower)
 
-    return " OR ".join(ft_terms) if ft_terms else ""
+    return " OR ".join(ft_terms[:15]) if ft_terms else ""
 
 
 @mcp.tool()
