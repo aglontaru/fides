@@ -1,7 +1,7 @@
-<p align="center">
+
 # Fides
 ## Universal Legal Intelligence & Knowledge Graph Platform
-</p>
+
 
 <p align="center">
   <strong>An autonomous multi-agent legal intelligence platform for indexing, analyzing, and querying legislation, regulations, codes, and contracts from any jurisdiction using a dynamic Neo4j knowledge graph.</strong>
