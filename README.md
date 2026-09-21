@@ -1,5 +1,7 @@
+<p align="center">
 # Fides
 ## Universal Legal Intelligence & Knowledge Graph Platform
+</p>
 
 <p align="center">
   <strong>An autonomous multi-agent legal intelligence platform for indexing, analyzing, and querying legislation, regulations, codes, and contracts from any jurisdiction using a dynamic Neo4j knowledge graph.</strong>
@@ -7,7 +9,7 @@
 
 <p align="center">
   Built with LangChain Deep Agents · Neo4j 5 · FastMCP · FastAPI · Pydantic v2<br/>
-  <em>by Alex Glontaru with ❤️ for Rematiq (Berlin)</em>
+  by Alex Glontaru with ❤️ for Rematiq (Berlin)
 </p>
 
 ---
