@@ -1,6 +1,9 @@
+<div align="center">
 
 # Fides
 ## Universal Legal Intelligence & Knowledge Graph Platform
+
+</div>
 
 
 <p align="center">
